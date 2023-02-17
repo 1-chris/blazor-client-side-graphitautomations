@@ -1,0 +1,171 @@
+﻿@page "/rebootdevicegroup"
+@using Microsoft.Graph
+
+@inject GraphITAutomations.Graph.GraphClientFactory clientFactory
+
+
+<AuthorizeView>
+    <Authorized>
+        <h1 class="mb-3">Reboot device group</h1>
+
+        <EditForm Model="GroupMembershipRequestForm" OnSubmit="GetGroupMembership" Context="blah">
+             <div class="form-control" style="width: 40rem; padding-bottom: 1.1rem">
+                <div>
+                    <strong><label class="form-text input-group">Group Id</label></strong>
+                    <InputText @bind-Value="GroupMembershipRequestForm.GroupId" class="form-control"></InputText>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Get managed device group membership</button>
+        </EditForm>
+
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Device Name</th>
+                    <th>Device Id</th>
+                    <th>Compliance state</th>
+                    <th>Last sync</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach(var managedDevice in managedDevices)
+                {
+                    <tr>
+                        <td>@managedDevice.DeviceName</td>
+                        <td>@managedDevice.Id</td>
+                        <td>@managedDevice.ComplianceState</td>
+                        <td>@managedDevice.LastSyncDateTime</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        <EditForm Model="RebootDeviceRequestForm" OnSubmit="RebootDevices" Context="blah2">
+            <button type="submit" class="btn btn-primary">Reboot listed devices</button>
+        </EditForm>
+
+    </Authorized>
+    <NotAuthorized>
+        <RedirectToLogin />
+    </NotAuthorized>
+</AuthorizeView>
+
+
+@code {
+    [CascadingParameter]
+    private Task<AuthenticationState>? authenticationStateTask { get; set; }
+
+    private GraphServiceClient? graphClient;
+    private List<ManagedDevice> managedDevices = new List<ManagedDevice>();
+    private string? dateTimeFormat;
+
+    public class GroupMembershipRequestModel
+    {
+        public string GroupId { get; set; } = string.Empty;
+    }
+    private GroupMembershipRequestModel GroupMembershipRequestForm { get; set; } = new GroupMembershipRequestModel();
+
+    public class RebootDeviceRequestModel
+    {
+        public bool RequestSent { get; set; } = false;
+    }
+    private RebootDeviceRequestModel RebootDeviceRequestForm { get; set; } = new RebootDeviceRequestModel();
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (authenticationStateTask == null)
+        {
+            throw new AuthenticationException(new Error
+            {
+                Message = "Unable to access authentication state"
+            });
+        }
+
+        var user = (await authenticationStateTask).User;
+
+        graphClient = clientFactory.GetAuthenticatedClient();
+
+    }
+
+    public async Task GetGroupMembership()
+    {
+        if (managedDevices.Count > 0)
+            managedDevices.Clear();
+
+        Console.WriteLine("GetGroupMembership called");
+
+        List<Device> devices = new List<Device>();
+
+        var members = await graphClient.Groups[$"{GroupMembershipRequestForm.GroupId}"].Members
+        .Request()
+        .GetAsync();
+
+        devices.AddRange(members.CurrentPage.OfType<Device>());
+        while (members.NextPageRequest != null)
+        {
+            Console.WriteLine("Getting next page data");
+            members = await members.NextPageRequest.GetAsync();
+            devices.AddRange(members.CurrentPage.OfType<Device>());
+        }
+
+        Console.WriteLine($"devices count: {devices.Count}");
+
+        foreach (var device in devices)
+        {
+            try
+            {
+                if (device != null && device.IsManaged == true && device.DeviceId != null && device.DeletedDateTime == null)
+                {
+                    var queryOptions = new List<QueryOption>
+                    {
+                        new QueryOption("$filter", $"azureAdDeviceId eq '{device.DeviceId}'")
+                    };
+
+                    var managedDeviceMember = await graphClient.DeviceManagement.ManagedDevices
+                        .Request(queryOptions)
+                        .GetAsync();
+
+                    Console.WriteLine($"managed devices count: {managedDevices.Count}");
+                    managedDevices.AddRange(managedDeviceMember.OfType<ManagedDevice>());
+
+                    /*
+                    managedDevices.AddRange(managedDeviceMember.CurrentPage.OfType<ManagedDevice>());
+                    while (managedDeviceMember.NextPageRequest != null)
+                    {
+                        Console.WriteLine("Getting next page data");
+                        managedDeviceMember = await managedDeviceMember.NextPageRequest.GetAsync();
+                        managedDevices.AddRange(managedDeviceMember.CurrentPage.OfType<ManagedDevice>());
+                    }
+                    */
+
+                }
+
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"WARNING: Managed device likely not found for azure ID: {device.Id}. Exception: {e.Message}");
+            }
+        }
+
+        
+
+    }
+
+    public async Task RebootDevices()
+    {
+        Console.WriteLine("RebootDevices called");
+
+        foreach (var managedDevice in managedDevices)
+        {
+            await graphClient.DeviceManagement.ManagedDevices[managedDevice.Id]
+                .RebootNow()
+                .Request()
+                .PostAsync();
+
+            Console.WriteLine($"Device reboot request sent: {managedDevice.DeviceName}");
+        }
+
+
+        RebootDeviceRequestForm.RequestSent = true;
+    }
+}
